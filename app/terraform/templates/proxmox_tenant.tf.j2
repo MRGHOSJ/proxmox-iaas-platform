@@ -1,0 +1,79 @@
+terraform {
+  required_providers {
+    proxmox = {
+      source  = "telmate/proxmox"
+      version = ">= 2.9.14"
+    }
+  }
+}
+
+provider "proxmox" {
+  pm_api_url          = var.proxmox_url
+  pm_api_token_id     = var.proxmox_username
+  pm_api_token_secret = var.proxmox_password
+  pm_tls_insecure     = true
+}
+
+resource "proxmox_vm_qemu" "tenant_firewall" {
+  target_node = var.proxmox_node
+  vmid        = var.vm_id
+  name        = var.vm_name
+
+  clone      = var.template_id
+  full_clone = true
+  os_type    = "other"
+  onboot     = true
+
+  cores   = var.cpu_cores
+  memory = var.memory_mb
+
+  disk {
+    type    = "scsi"
+    storage = var.storage
+    size    = var.disk_size
+  }
+
+  network {
+    model    = "virtio"
+    bridge   = var.wan_bridge
+    firewall = false
+    tag      = -1
+  }
+
+  network {
+    model    = "virtio"
+    bridge   = var.bridge_name
+    firewall = false
+    tag      = -1
+  }
+
+  lifecycle {
+    ignore_changes = [network, disk, clone]
+  }
+}
+
+output "vm_id" {
+  value = proxmox_vm_qemu.tenant_firewall.vmid
+}
+
+output "vm_name" {
+  value = proxmox_vm_qemu.tenant_firewall.name
+}
+
+variable "proxmox_url" { type = string }
+variable "proxmox_username" { type = string }
+variable "proxmox_password" { type = string }
+variable "proxmox_node" { type = string }
+
+variable "bridge_id" { type = number }
+variable "bridge_name" { type = string }
+variable "vm_id" { type = number }
+variable "vm_name" { type = string }
+variable "template_id" { type = number }
+
+variable "wan_bridge" { type = string, default = "vmbr0" }
+
+variable "cpu_cores" { type = number, default = 2 }
+variable "memory_mb" { type = number, default = 2048 }
+variable "disk_size" { type = string, default = "8G" }
+variable "storage" { type = string, default = "local-lvm" }

@@ -1,0 +1,25 @@
+#!/bin/bash
+# Cloud-Init Script forCloud VMs
+
+echo "=========================================="
+echo "  PROXMOX IaaS PLATFORM - INITIALIZING VM"
+echo "  Hostname: {{ vm_name }}"
+echo "=========================================="
+
+# Update Packages
+apt-get update
+apt-get install -y curl git
+
+# Create User
+useradd -m -s /bin/bash {{ ssh_user }}
+echo "{{ ssh_user}}:{{ ssh_password }}" | chpasswd
+
+# Add SSH Public Key
+mkdir -p /home/{{ ssh_user }}/.ssh
+echo "{{ ssh_public_key }}" >> /home/{{ ssh_user }}/.ssh/authorized_keys
+chown -R {{ ssh_user }}:{{ ssh_user }} /home/{{ ssh_user }}/.ssh
+
+# Enable Passwordless Sudo
+echo "{{ ssh_user }} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+echo "Initialization Complete!"

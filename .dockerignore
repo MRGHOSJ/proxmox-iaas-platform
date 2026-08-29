@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pgdata
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+app/venv/
+app/.venv/
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project Specific (Based on your directory listing)
+# Exclude tests and reports to keep image light
+tests/
+.pytest_cache/
+.benchmarks/
+report.html
+test.db
+
+# Environment Variables
+# We use the ones defined in docker-compose, not local .env files
+
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker
+Dockerfile
+docker-compose.yml
+docker-compose.example.yml

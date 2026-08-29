@@ -1,0 +1,32 @@
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN wget -q https://releases.hashicorp.com/terraform/1.14.5/terraform_1.14.5_linux_amd64.zip && \
+    unzip terraform_1.14.5_linux_amd64.zip -d /usr/local/bin && \
+    rm terraform_1.14.5_linux_amd64.zip
+
+RUN pip install --no-cache-dir --upgrade pip
+
+COPY app/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY app /app/app
+
+RUN groupadd --system appgroup && useradd --system --gid appgroup appuser && \
+    chown -R appuser:appgroup /app
+
+COPY app/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENV PYTHONPATH=/app
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD python -m celery -A app.workers.celery_app inspect ping || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]

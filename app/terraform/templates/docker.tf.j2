@@ -1,0 +1,196 @@
+terraform {
+  backend "pg" {
+    schema_name = "workloads_state"
+  }
+  required_providers {
+    docker = {
+      source  = "kreuzwerker/docker"
+      version = "~> 3.0" 
+    }
+  }
+}
+
+provider "docker" {}
+
+# --- NETWORK LOOKUP (DATA SOURCE) ---
+# This looks up the network created by the separate Infrastructure job
+data "docker_network" "existing_network" {
+  # Only try to look it up if networking is enabled
+  count   = {% if enable_networking %}1{% else %}0{% endif %}
+  name    = "{{ network_name }}"
+}
+
+resource "docker_image" "vm_image" {
+  name = var.image_name
+}
+
+resource "docker_container" "vm_instance" {
+  name  = var.vm_name
+  image = docker_image.vm_image.image_id
+  restart = "unless-stopped"
+  
+  cpu_shares = var.cpu_shares
+  memory     = var.memory_mb
+  
+  # Init script with inner layer firewall (default deny policy)
+  # Firewall rules are embedded in startup command for persistence
+  command = ["/bin/sh", "-c", <<-EOT
+    # Install base packages
+    apt-get update && apt-get install -y openssh-server iputils-ping net-tools dnsutils curl wget sudo iptables
+    
+    # Configure SSH
+    mkdir -p /run/sshd
+    echo 'root:cloud' | chpasswd
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    
+    # =============================================================================
+    # Inner Layer Firewall - Default DROP Policy (Defense in Depth)
+    # Embedded in startup script for persistence across reboots
+    # =============================================================================
+    
+    # Allow loopback interface FIRST (always allow)
+    iptables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
+    
+    # Allow established/related connections FIRST (always allow)
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    
+    # =============================================================================
+    # Step 1: If saved rules exist, restore them first (for persistence)
+    # =============================================================================
+    if [ -f /etc/iptables/saved-rules ]; then
+        iptables-restore < /etc/iptables/saved-rules 2>/dev/null || true
+        echo "Restored saved firewall rules from /etc/iptables/saved-rules"
+    fi
+    
+    # =============================================================================
+    # Step 2: Always apply template rules (these might be newer than saved-rules)
+    # Apply ALLOW rules first (before DROP policy)
+    # =============================================================================
+    {% for rule in firewall_inner_rules %}
+    {% if rule.direction == "ingress" and rule.action == "allow" %}
+    # {{ rule.description | default("Rule") }} - ALLOW {{ rule.protocol }}:{{ rule.port }} from {{ rule.cidr }}
+    iptables -I INPUT -p {{ rule.protocol }} -s {{ rule.cidr }} --dport {{ rule.port }} -j ACCEPT 2>/dev/null || true
+    {% endif %}
+    {% endfor %}
+    
+    # =============================================================================
+    # Step 3: Set default DROP policy
+    # =============================================================================
+    iptables -P INPUT DROP 2>/dev/null || true
+    iptables -P FORWARD DROP 2>/dev/null || true
+    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+    
+    # =============================================================================
+    # Step 4: Add DENY rules (after DROP policy - only catches what wasn't allowed above)
+    # =============================================================================
+    {% for rule in firewall_inner_rules %}
+    {% if rule.direction == "ingress" and rule.action == "deny" %}
+    # {{ rule.description | default("Rule") }} - DENY {{ rule.protocol }}:{{ rule.port }} from {{ rule.cidr }}
+    iptables -I INPUT -p {{ rule.protocol }} -s {{ rule.cidr }} --dport {{ rule.port }} -j DROP 2>/dev/null || true
+    {% endif %}
+    {% endfor %}
+    
+    # =============================================================================
+    # Step 5: Always save rules for persistence (overwrites old saved-rules)
+    # =============================================================================
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/saved-rules 2>/dev/null || true
+    echo "Saved firewall rules to /etc/iptables/saved-rules"
+    
+    # =============================================================================
+    # Step 6: Log dropped packets (optional, limit to prevent DoS)
+    # =============================================================================
+    iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "IPT-DROP: " 2>/dev/null || true
+    
+    echo "Inner firewall configured with DROP policy"
+    
+    # Start SSH
+    /usr/sbin/sshd
+    
+    # Keep container running
+    tail -f /dev/null
+  EOT
+]
+
+  # Standard port forwarding (Host -> Container)
+  ports {
+    internal = 22
+    external = var.external_port
+  }
+
+  # ATTACHMENT LOGIC
+  # If networking is enabled, attach to the looked-up network
+  {% if enable_networking %}
+  networks_advanced {
+    name        = data.docker_network.existing_network[0].name
+    ipv4_address = "{{ ip_address }}"
+  }
+  {% endif %}
+  
+  labels {
+    label = "managed_by"
+    value = "proxmox-automation-cloud"
+  }
+  labels {
+    label = "vm_id"
+    value = "{{ vm_id }}" # You need to pass vm_id to variables
+  }
+  
+  # Security: Add NET_ADMIN capability for inner layer firewall (iptables)
+  # This allows the container to modify its own iptables rules
+  capabilities {
+    add = ["NET_ADMIN"]
+  }
+}
+
+output "vm_external_port" {
+  description = "The port on the host machine"
+  value       = docker_container.vm_instance.ports[0].external
+}
+
+output "vm_internal_ip" {
+  description = "The internal IP address assigned by Docker"
+  value       = var.ip_address
+}
+
+# --- VARIABLES ---
+
+variable "vm_id" { type = number }
+variable "vm_name" { type = string }
+variable "image_name" { type = string }
+variable "cpu_shares" { type = number }
+variable "memory_mb" { type = number }
+variable "external_port" { type = number }
+
+# Network Variables
+variable "enable_networking" { type = bool }
+variable "network_name" { type = string }
+variable "ip_address" { type = string }
+
+# Firewall Variables
+variable "firewall_outer_rules" {
+  description = "Outer layer firewall rules - iptables DOCKER-USER chain"
+  type = list(object({
+    port       = number
+    protocol   = string
+    cidr       = string
+    action     = string
+    direction  = string
+    priority   = number
+  }))
+  default = []
+}
+
+variable "firewall_inner_rules" {
+  description = "Inner layer firewall rules embedded in container startup"
+  type = list(object({
+    port       = number
+    protocol   = string
+    cidr       = string
+    action     = string
+    direction  = string
+    priority   = number
+  }))
+  default = []
+}

@@ -1,0 +1,48 @@
+# Testing Dependencies
+# Install with: pip install -r requirements-test.txt
+
+# Core Testing Framework
+httpx
+ruff
+pytest
+pytest-asyncio
+pytest-cov
+pytest-mock
+pytest-xdist
+
+# Test Monitoring & Reporting
+pytest-html
+pytest-json-report
+pytest-benchmark
+
+# Code Coverage
+coverage
+coverage-badge
+
+# Test Utilities
+faker
+factory-boy
+freezegun
+responses
+
+# Development Tools (optional but recommended)
+pytest-watch  # Auto-run tests on file changes
+pytest-testmon  # Only run tests affected by changes
+pytest-sugar  # Better test output formatting
+
+# Linting & Code Quality (for CI/CD)
+black # Code formatter
+flake8  # Linter
+isort  # Import sorter
+mypy  # Type checker
+pylint  # Additional linting
+
+# Security Testing
+bandit  # Security vulnerability scanner
+safety  # Check dependencies for vulnerabilities
+
+# Performance Testing
+locust  # Load testing (optional for stress tests)
+
+# Documentation Testing
+pytest-doctestplus  # Test code in docstrings

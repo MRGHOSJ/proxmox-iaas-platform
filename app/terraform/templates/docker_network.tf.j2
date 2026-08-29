@@ -1,0 +1,40 @@
+terraform {
+  backend "pg" {
+    # Connection string loaded from TF_BACKEND_CONN_STR environment variable
+    # Never hardcode credentials in templates
+    schema_name = "infrastructure_state"
+  }
+  required_providers {
+    docker = {
+      source  = "kreuzwerker/docker"
+      version = "~> 3.0" 
+    }
+  }
+}
+
+provider "docker" {}
+
+# This resource creates the actual bridge in Docker
+resource "docker_network" "infra_network" {
+  name = "{{ network_name }}"
+  
+  # Define the IPAM pool (Subnet)
+  ipam_config {
+    subnet = "{{ subnet_cidr }}"
+  }
+
+  labels {
+    label = "managed_by"
+    value = "proxmox-automation-cloud"
+  }
+  
+  # Ensure we don't delete this just because a VM is deleted
+  # (Though Terraform manages state, 'lifecycle' helps if we ever import)
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+output "network_id" {
+  value = docker_network.infra_network.id
+}

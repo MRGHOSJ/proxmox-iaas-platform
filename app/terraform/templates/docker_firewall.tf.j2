@@ -1,0 +1,182 @@
+# =============================================================================
+# Docker Firewall Template - Two Layer Defense in Depth
+# =============================================================================
+# 
+# Layer 1 (Outer): Host-level firewall using iptables DOCKER-USER chain
+#   - Targets specific container IP (-d <VM_IP>)
+#   - Prevents affecting other containers
+#   - Persists across container restarts
+#
+# Layer 2 (Inner): Guest OS firewall using container startup script
+#   - Embeds iptables rules in container startup command
+#   - Persists across container restarts
+#   - No additional capabilities required
+#
+# Provider-Agnostic Design:
+#   - This template implements Docker-specific firewall logic
+#   - vSphere/Proxmox will use different templates (future)
+# =============================================================================
+
+terraform {
+  required_version = ">= 1.0"
+  
+  backend "pg" {
+    schema_name = "firewall_state"
+  }
+}
+
+# =============================================================================
+# Variables
+# =============================================================================
+
+variable "vm_id" {
+  description = "VM ID for tagging and identification"
+  type       = number
+}
+
+variable "vm_name" {
+  description = "Container name"
+  type       = string
+}
+
+variable "vm_ip" {
+  description = "Container IP address for outer layer firewall targeting"
+  type       = string
+  default    = ""
+}
+
+# Firewall Rules Configuration
+variable "firewall_outer_rules" {
+  description = "Outer layer (host) firewall rules - iptables DOCKER-USER chain"
+  type = list(object({
+    port       = number
+    protocol   = string
+    cidr       = string
+    action     = string
+    direction  = string
+    priority   = number
+  }))
+  default = []
+}
+
+variable "firewall_inner_rules" {
+  description = "Inner layer (guest) firewall rules - embedded in startup script"
+  type = list(object({
+    port       = number
+    protocol   = string
+    cidr       = string
+    action     = string
+    direction  = string
+    priority   = number
+  }))
+  default = []
+}
+
+# =============================================================================
+# Layer 1: Outer Firewall (Host iptables - DOCKER-USER)
+# =============================================================================
+# 
+# Applies rules at the host level using iptables DOCKER-USER chain.
+# Rules specifically target the container's IP address to avoid affecting other containers.
+# These rules persist across container restarts.
+#
+
+resource "null_resource" "firewall_outer" {
+  count = length(var.firewall_outer_rules) > 0 ? 1 : 0
+  
+  triggers = {
+    vm_id      = var.vm_id
+    vm_ip      = var.vm_ip
+    rules_hash = md5(jsonencode(var.firewall_outer_rules))
+  }
+
+  # Apply outer layer rules (ingress)
+  provisioner "local-exec" {
+    command = <<-EOT
+      # Layer 1: Outer Firewall - DOCKER-USER chain
+      # Targets specific container IP to prevent affecting other containers
+      
+      {% for rule in firewall_outer_rules %}
+      {% if rule.direction == "ingress" %}
+      # Rule: {{ rule.action }} {{ rule.protocol }}:{{ rule.port }} from {{ rule.cidr }} (priority {{ rule.priority }})
+      sudo iptables -C DOCKER-USER -d ${var.vm_ip} -p {{ rule.protocol }} -s {{ rule.cidr }} --dport {{ rule.port }} -j {{ rule.action | upper }} 2>/dev/null || \
+      sudo iptables -I DOCKER-USER 1 -d ${var.vm_ip} -p {{ rule.protocol }} -s {{ rule.cidr }} --dport {{ rule.port }} -j {{ rule.action | upper }} -m comment --comment "VM-${var.vm_id}-{{ rule.priority }}"
+      {% endif %}
+      {% endfor %}
+      
+      echo "Applied $(echo '{{ firewall_outer_rules | length }}') outer layer firewall rules for VM ${var.vm_id}"
+    EOT
+  }
+
+  # Cleanup outer layer rules on destroy
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      # Cleanup: Remove all rules tagged with this VM ID
+      # Using comment to identify rules associated with this VM
+      
+      for rule in $(sudo iptables -L DOCKER-USER -n --line-numbers | grep "VM-${var.vm_id}" | awk '{print $1}' | tac); do
+        sudo iptables -D DOCKER-USER $rule 2>/dev/null || true
+      done
+      
+      echo "Cleaned up outer layer firewall rules for VM ${var.vm_id}"
+    EOT
+  }
+}
+
+# =============================================================================
+# Layer 2: Inner Firewall (Container Startup Script)
+# =============================================================================
+#
+# Embeds iptables rules in the container startup command.
+# This ensures rules persist across container restarts.
+# Default policy: DROP (deny all) - only allow specified ports.
+#
+
+# Generate firewall startup script
+locals {
+  # Build inner firewall startup commands
+  firewall_script = <<-EOT
+    # =============================================================================
+    # Inner Layer Firewall - Default Deny Policy
+    # Applied at container startup for persistence
+    # =============================================================================
+    
+    # Set default policies (drop everything by default)
+    iptables -P INPUT DROP 2>/dev/null || true
+    iptables -P FORWARD DROP 2>/dev/null || true
+    iptables -P OUTPUT ACCEPT 2>/dev/null || true
+    
+    # Allow loopback
+    iptables -A INPUT -i lo -j ACCEPT 2>/dev/null || true
+    
+    # Allow established connections
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    
+    # Allow SSH (always - critical for management)
+    iptables -A INPUT -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+    
+    {% for rule in firewall_inner_rules %}
+    {% if rule.direction == "ingress" and rule.action == "allow" %}
+    # Allow {{ rule.protocol }}:{{ rule.port }} from {{ rule.cidr }} (priority {{ rule.priority }})
+    iptables -A INPUT -p {{ rule.protocol }} -s {{ rule.cidr }} --dport {{ rule.port }} -j ACCEPT 2>/dev/null || true
+    {% endif %}
+    {% endfor %}
+    
+    # Log dropped packets (optional, for debugging)
+    # iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "IPT-DROP: "
+    
+    echo "Inner firewall configured with default DROP policy"
+  EOT
+}
+
+# Output the generated firewall script (for debugging)
+output "firewall_startup_script" {
+  description = "Generated inner layer firewall startup script"
+  value       = local.firewall_script
+  sensitive   = false
+}
+
+# Note: The actual firewall script is embedded in the container startup command
+# in the main docker.tf.j2 template, not as a separate resource.
+# This is because the startup command needs to be part of the container definition.
